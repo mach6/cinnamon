@@ -461,6 +461,12 @@ var Applet = class Applet {
         this.emit("orientation-changed", orientation);
         this.finalizeContextMenu();
 
+        // Re-point the applet's popup menu (the documented `this.menu` convention) so a
+        // menu opened after the applet moves to a differently-oriented zone (e.g. dragged
+        // from a grid row to an expanding panel's vertical arm) faces the right way.
+        if (this.menu && typeof this.menu.setArrowSide === "function")
+            this.menu.setArrowSide(orientation);
+
         if (typeof this.set_applet_label === 'function' && this._applet_label instanceof St.Label) {
             this.set_applet_label(this._applet_label.get_text());
         }
@@ -656,7 +662,9 @@ var Applet = class Applet {
     }
 
     get _panelHeight() {
-        return this.panel.height;
+        // In a grid row / expanding arm, the applet sizes to that zone's thickness,
+        // not the full panel height, so it fits its row/arm.
+        return this.panel.getZoneHeight(this.locationLabel);
     }
 
     get _scaleMode() {

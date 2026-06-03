@@ -169,7 +169,7 @@ function createAppletDefinition(definition) {
 
         // Panel might not exist. Still keep definition for future use.
         if (panel) {
-            orientation = setOrientationForPanel(panel.panelPosition);
+            orientation = orientationForApplet(panel, elements[1]);
         }
 
         let appletDefinition = {
@@ -220,6 +220,13 @@ function setOrientationForPanel(panelPos) {
     }
 
     return orientation;
+}
+
+// The orientation an applet should use, accounting for non-edge panel layouts whose
+// zones can run perpendicular to the panel itself (e.g. an expanding panel's vertical
+// arm). Falls back to the panel-position orientation for ordinary zones/panels.
+function orientationForApplet(panel, location_label) {
+    return panel.getZoneOrientation(location_label, setOrientationForPanel(panel.panelPosition));
 }
 
 function checkForUpgrade(newEnabledApplets) {
@@ -599,7 +606,9 @@ function createApplet(extension, appletDefinition, panel = null) {
         // FIXME: Panel height is now available before an applet is initialized,
         // so we don't need to pass it to the constructor anymore, but would
         // require a compatibility clean-up effort.
-        applet = module.main(extension.meta, orientation, panel.height, applet_id);
+        // Grid/expanding zones pass their own thickness so applets size to the
+        // row/arm they sit in rather than the whole panel.
+        applet = module.main(extension.meta, orientation, panel.getZoneHeight(appletDefinition.location_label), applet_id);
     } catch (e) {
         Extension.logError(`Failed to evaluate 'main' function on applet: ${uuid}/${applet_id}`, uuid, e);
         return null;
@@ -715,13 +724,9 @@ function get_object_for_uuid (uuid, instanceId) {
  * Loads all applets on the panel if not loaded
  */
 function loadAppletsOnPanel(panel) {
-    let orientation;
-
-    orientation = setOrientationForPanel(panel.panelPosition);
-
     for (var i = 0; i < definitions.length; i++) {
         if (definitions[i].panelId === panel.panelId) {
-            definitions[i].orientation = orientation;
+            definitions[i].orientation = orientationForApplet(panel, definitions[i].location_label);
             let extension = Extension.getExtension(definitions[i].uuid);
             if (extension) {
                 addAppletToPanels(extension, definitions[i], panel);
@@ -737,10 +742,9 @@ function loadAppletsOnPanel(panel) {
  * Updates the definition, orientation and height of applets on the panel
  */
 function updateAppletsOnPanel (panel) {
-    let orientation = setOrientationForPanel(panel.panelPosition);
-
     for (let i = 0; i < definitions.length; i++) {
         if (definitions[i].panelId === panel.panelId) {
+            let orientation = orientationForApplet(panel, definitions[i].location_label);
             definitions[i].orientation = orientation;
 
             if (definitions[i].applet) {

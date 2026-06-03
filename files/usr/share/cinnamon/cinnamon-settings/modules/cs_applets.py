@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
 import sys
+import json
 from ExtensionCore import ManageSpicesPage, DownloadSpicesPage
 from SettingsWidgets import SidePage
 from xapp.SettingsWidgets import SettingsStack
@@ -152,4 +153,32 @@ class ManageAppletsPage(ManageSpicesPage):
             self.spices.send_proxy_signal('highlightPanel', '(ib)', self.panel_id, True)
 
     def enable(self, uuid):
-        self.spices.enable_extension(uuid, panel=self.panel_id)
+        # Grid/expanding panels hide the usual left/center/right boxes, so a newly
+        # added applet has to land in one of their own visible zones (a grid row, or
+        # an expanding arm) or it would be invisible. From there it can be dragged to
+        # another row/arm in panel edit mode.
+        self.spices.enable_extension(uuid, panel=self.panel_id,
+                                     box=self._default_box_for_panel(self.panel_id))
+
+    def _default_box_for_panel(self, panel_id):
+        ext = None
+        for entry in self.spices.settings.get_strv("panels-extended"):
+            try:
+                obj = json.loads(entry)
+            except Exception:
+                continue
+            if isinstance(obj, dict) and str(obj.get("id")) == str(panel_id):
+                ext = obj
+                break
+
+        if ext is None:
+            return "right"
+
+        ptype = ext.get("type", "edge")
+        if ptype == "grid":
+            return "row0"
+        if ptype == "expanding":
+            # Only the arms its expandAxes selects are visible: "y" is a single
+            # vertical strip (vertical arm only); "x" and "both" show the horizontal arm.
+            return "armv" if ext.get("expandAxes") == "y" else "armh"
+        return "right"

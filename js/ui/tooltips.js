@@ -353,23 +353,43 @@ PanelItemTooltip.prototype = {
         let tooltipLeft = 0;
         let panel = null;
 
+        // An applet on a non-edge panel (floating/grid/expanding) has no edge
+        // panel to sit against, and its orientation may name an edge with no panel
+        // at all (the vertical arm of an expanding L). Place the tooltip against
+        // the box the panel anchors its menus to instead, on the same side.
+        let anchor = null;
+        for (let p of Main.panelManager.getPanels()) {
+            if (p && !p.occupiesEdge() && p.actor.contains(this._panelItem.actor)) {
+                anchor = p._geometry.getMenuAnchorBox(this._panelItem.actor).anchor;
+                break;
+            }
+        }
+
         switch (this.orientation) {
             case St.Side.BOTTOM:
-                panel = Main.panelManager.getPanel(monitor.index, PanelLoc.bottom);
-                tooltipTop = monitor.y + monitor.height - tooltipHeight - panel.actor.height;
+                if (anchor) {
+                    tooltipTop = anchor.y1 - tooltipHeight;
+                } else {
+                    panel = Main.panelManager.getPanel(monitor.index, PanelLoc.bottom);
+                    tooltipTop = monitor.y + monitor.height - tooltipHeight - panel.actor.height;
+                }
                 tooltipLeft = this.mousePosition[0] - Math.round(tooltipWidth / 2);
                 tooltipLeft = Math.max(tooltipLeft, monitor.x);
                 tooltipLeft = Math.min(tooltipLeft, monitor.x + monitor.width - tooltipWidth);
                 break;
             case St.Side.TOP:
-                panel = Main.panelManager.getPanel(monitor.index, PanelLoc.top);
-                tooltipTop =  monitor.y + panel.actor.height;
+                if (anchor) {
+                    tooltipTop = anchor.y2;
+                } else {
+                    panel = Main.panelManager.getPanel(monitor.index, PanelLoc.top);
+                    tooltipTop =  monitor.y + panel.actor.height;
+                }
                 tooltipLeft = this.mousePosition[0] - Math.round(tooltipWidth / 2);
                 tooltipLeft = Math.max(tooltipLeft, monitor.x);
                 tooltipLeft = Math.min(tooltipLeft, monitor.x + monitor.width - tooltipWidth);
                 break;
             case St.Side.LEFT:
-                panel = Main.panelManager.getPanel(monitor.index, PanelLoc.left);
+                panel = anchor ? null : Main.panelManager.getPanel(monitor.index, PanelLoc.left);
                 tooltipTop = this._panelItem.actor.get_transformed_position()[1];
                 tooltipTop += Math.round((this._panelItem.actor.height - tooltipHeight) / 2);
 
@@ -381,10 +401,10 @@ PanelItemTooltip.prototype = {
                     tooltipTop = monitor.y + monitor.height - tooltipHeight;
                 }
 
-                tooltipLeft = monitor.x + panel.actor.width;
+                tooltipLeft = anchor ? anchor.x2 : monitor.x + panel.actor.width;
                 break;
             case St.Side.RIGHT:
-                panel = Main.panelManager.getPanel(monitor.index, PanelLoc.right);
+                panel = anchor ? null : Main.panelManager.getPanel(monitor.index, PanelLoc.right);
                 tooltipTop = this._panelItem.actor.get_transformed_position()[1];
                 tooltipTop += Math.round((this._panelItem.actor.height - tooltipHeight) / 2);
 
@@ -396,7 +416,7 @@ PanelItemTooltip.prototype = {
                     tooltipTop = monitor.y + monitor.height - tooltipHeight;
                 }
 
-                tooltipLeft = monitor.x + monitor.width - tooltipWidth - panel.actor.width;
+                tooltipLeft = anchor ? anchor.x1 - tooltipWidth : monitor.x + monitor.width - tooltipWidth - panel.actor.width;
                 break;
             default:
                 break;

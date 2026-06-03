@@ -206,6 +206,10 @@ function heightsUsedMonitor (monitorIndex, listofpanels) {
 
     for (let i = 0, len = listofpanels.length; i < len; i++) {
         if (listofpanels[i]) {
+            // Floating/grid/expanding panels don't occupy an edge, so they must
+            // not count towards the height available to other panels.
+            if (!listofpanels[i].occupiesEdge())
+                continue;
             if (listofpanels[i].monitorIndex == monitorIndex) {
                 if (listofpanels[i].panelPosition == PanelLoc.top)
                     toppanelHeight = listofpanels[i].actor.height;
@@ -368,6 +372,121 @@ function updatePanelsMeta(meta, panel_props) {
     return changed;
 }
 
+// The panel types the shell knows. Anything else in a panels-extended entry is
+// treated as "edge" everywhere (getPanelType), so a mis-typed panel is a normal
+// edge panel for the strategies AND for the edge bookkeeping.
+const PANEL_TYPES = ["edge", "floating", "grid", "expanding"];
+
+// Parsed "panels-extended", cached until the key changes (PanelManager clears it
+// on changed::panels-extended, and setPanelExtendedList on a write). It is read
+// on every allocation and applet sizing of a grid/expanding panel, so parsing it
+// per call would be wasteful. Entries are shared: callers treat them as read-only.
+let _panelExtendedCache = null;
+
+function invalidatePanelExtendedCache() {
+    _panelExtendedCache = null;
+}
+
+/**
+ * getPanelExtendedList:
+ *
+ * Returns the parsed contents of the "panels-extended" settings key as an array
+ * of per-panel config objects. The key is an "as" (string array); each element is
+ * a JSON object describing one panel, keyed by its "id". Bad/garbage entries are
+ * skipped (logged) so callers never have to guard against malformed JSON.
+ */
+function getPanelExtendedList() {
+    if (_panelExtendedCache)
+        return _panelExtendedCache;
+    let entries = global.settings.get_strv("panels-extended");
+    let list = [];
+    for (let i = 0, len = entries.length; i < len; i++) {
+        try {
+            let obj = JSON.parse(entries[i]);
+            if (obj && typeof obj === "object")
+                list.push(obj);
+        } catch (e) {
+            global.logError("Ignoring malformed panels-extended entry: " + entries[i] + " (" + e + ")");
+        }
+    }
+    _panelExtendedCache = list;
+    return list;
+}
+
+// The entry for panel @id in @list, or null.
+function findPanelExtended(list, id) {
+    for (let i = 0, len = list.length; i < len; i++) {
+        if (parseInt(list[i].id) === parseInt(id))
+            return list[i];
+    }
+    return null;
+}
+
+/**
+ * getPanelExtended:
+ * @id (integer): panel id
+ *
+ * Returns the extended config object for panel @id. If the panel has no entry in
+ * panels-extended it is a traditional edge panel, so a default {id, type:"edge"}
+ * object is returned.
+ *
+ * Returns: (object) the panel's extended config
+ */
+function getPanelExtended(id) {
+    return findPanelExtended(getPanelExtendedList(), id) || { id: parseInt(id), type: "edge" };
+}
+
+/**
+ * getPanelType:
+ * @id (integer): panel id
+ *
+ * Convenience wrapper returning just the panel type string ("edge", "floating",
+ * "grid" or "expanding") for panel @id. Unknown/missing types fall back to "edge".
+ *
+ * Returns: (string) the panel type
+ */
+function getPanelType(id) {
+    let type = getPanelExtended(id).type;
+    return (PANEL_TYPES.indexOf(type) !== -1) ? type : "edge";
+}
+
+/**
+ * setPanelExtendedList:
+ * @list (array): array of extended panel config objects
+ *
+ * Writes @list back to the panels-extended settings key as an "as" array, one
+ * JSON-encoded string per config object.
+ */
+function setPanelExtendedList(list) {
+    let entries = [];
+    for (let i = 0, len = list.length; i < len; i++) {
+        if (list[i])
+            entries.push(JSON.stringify(list[i]));
+    }
+    invalidatePanelExtendedCache();
+    global.settings.set_strv("panels-extended", entries);
+}
+
+/**
+ * updatePanelExtended:
+ * @id (integer): panel id
+ * @props (object): properties to merge into the panel's extended config
+ *
+ * Merges @props into the extended config object for panel @id, creating the
+ * entry if it does not yet exist, and persists the result. Used by non-edge
+ * panels to save runtime state such as a dragged floating-panel position.
+ */
+function updatePanelExtended(id, props) {
+    let list = getPanelExtendedList();
+    let entry = findPanelExtended(list, id);
+    if (entry)
+        Object.assign(entry, props);
+    else
+        list.push(Object.assign({ id: parseInt(id) }, props));
+
+    setPanelExtendedList(list);
+}
+
 /**
  * #PanelManager
  *
@@ -388,6 +507,10 @@ PanelManager.prototype = {
         this.panelsMeta = [];   // Properties of panels in format [<monitor index>, <panelPosition>]
         this.canAdd = true;     // Whether there is space for more panels to be added
         this.monitorCount = global.display.get_n_monitors();
+
+        // Connected before any panel exists so the cache is dropped before the
+        // panels' own changed::panels-extended handlers re-read it.
+        global.settings.connect("changed::panels-extended", invalidatePanelExtendedCache);
 
         let editMode = global.settings.get_boolean("panel-edit-mode");
         if (editMode == true)
@@ -457,8 +580,13 @@ PanelManager.prototype = {
                     global.log("Duplicate ID detected in panel definition: " + panel_defs[i]);
                     return true;
                 }
-                // Ignore any duplicate monitor/position combinations
-                if ((good_elements[PanelDefElement.MONITOR] === elements[PanelDefElement.MONITOR]) && (good_elements[PanelDefElement.POSITION] === elements[PanelDefElement.POSITION])) {
+                // Ignore any duplicate monitor/position combinations, but only
+                // for edge panels: floating/grid/expanding panels have no real
+                // edge, so their nominal position needn't be unique. (No Panel
+                // objects exist yet, so this goes by the configured type.)
+                if (getPanelType(elements[PanelDefElement.ID]) === "edge" &&
+                    getPanelType(good_elements[PanelDefElement.ID]) === "edge" &&
+                    (good_elements[PanelDefElement.MONITOR] === elements[PanelDefElement.MONITOR]) && (good_elements[PanelDefElement.POSITION] === elements[PanelDefElement.POSITION])) {
                     global.log("Duplicate monitor+position detected in panel definition: " + panel_defs[i]);
                     return true;
                 }
@@ -645,6 +773,11 @@ PanelManager.prototype = {
         }
 
         setPanelsEnabledList(list);
+
+        // Also drop this panel's extended config, otherwise a later panel that reuses
+        // the freed id would inherit the removed panel's type/geometry.
+        let ext = getPanelExtendedList().filter(e => parseInt(e.id) !== parseInt(panelId));
+        setPanelExtendedList(ext);
     },
 
     /**
@@ -808,6 +941,11 @@ PanelManager.prototype = {
         for (let i = 0, len = this.panels.length; i < len; i++) {
             if (!this.panels[i])
                 continue;
+            // Only an edge panel occupies the edge its panelPosition names; a
+            // floating/grid/expanding panel just uses panelPosition to orient its
+            // applets, so callers sizing against that edge must not get it.
+            if (!this.panels[i].occupiesEdge())
+                continue;
             if (this.panels[i].monitorIndex == monitorIndex && this.panels[i].panelPosition == panelPosition)
                 return this.panels[i];
         }
@@ -861,7 +999,8 @@ PanelManager.prototype = {
             if (!metaList[i]) {
                 continue;
             }
-            if ((metaList[i][0] == monitorIndex) && (metaList[i][1] == panelPosition) && i != ID) {
+            if ((metaList[i][0] == monitorIndex) && (metaList[i][1] == panelPosition) && i != ID &&
+                getPanelType(ID) === "edge" && getPanelType(i) === "edge") {
                 switch (panelPosition)
                 {
                     case PanelLoc.top:
@@ -900,7 +1039,14 @@ PanelManager.prototype = {
     },
 
     _checkCanAdd: function() {
-        let panelCount = (this.monitorCount * 4) - this.panelCount;          // max of 4 panels on a monitor, one per edge
+        // Non-edge panels (floating/grid/expanding) don't occupy an edge, so they
+        // must not use up the edge slots.
+        let nonEdgeCount = 0;
+        for (let i = 0, len = this.panels.length; i < len; i++) {
+            if (this.panels[i] && !this.panels[i].occupiesEdge())
+                nonEdgeCount++;
+        }
+        let panelCount = (this.monitorCount * 4) - (this.panelCount - nonEdgeCount);   // max of 4 panels on a monitor, one per edge
 
         this.canAdd = panelCount > 0;
     },
@@ -1840,16 +1986,20 @@ PanelContextMenu.prototype = {
     }
 }
 
-function PanelZoneDNDHandler(panelZone, zoneString, panelId){
-    this._init(panelZone, zoneString, panelId);
+function PanelZoneDNDHandler(panelZone, zoneString, panelId, verticalOverride){
+    this._init(panelZone, zoneString, panelId, verticalOverride);
 }
 
 PanelZoneDNDHandler.prototype = {
-    _init : function(panelZone, zoneString, panelId) {
+    _init : function(panelZone, zoneString, panelId, verticalOverride) {
         this._panelZone = panelZone;
         this._panelZone._delegate = this;
         this._zoneString = zoneString;
         this._panelId = panelId;
+        // Non-edge layouts (grid rows, expanding arms) can run a zone perpendicular
+        // to the panel's own orientation, so they pass an explicit vertical flag.
+        // When null we fall back to the panel's orientation, as edge zones do.
+        this._verticalOverride = (verticalOverride === undefined) ? null : verticalOverride;
         this._dragPlaceholder = null;
         this._dragPlaceholderPos = -1;
 
@@ -1857,6 +2007,12 @@ PanelZoneDNDHandler.prototype = {
         this._origAppletPos = -1;
 
         this._panelZone.connect('leave-event', Lang.bind(this, this._handleLeaveEvent));
+    },
+
+    _isVertical: function() {
+        if (this._verticalOverride !== null)
+            return this._verticalOverride;
+        return this._panelZone.get_parent()._delegate.is_vertical;
     },
 
     handleDragOver: function(source, actor, x, y, time) {
@@ -1867,7 +2023,7 @@ PanelZoneDNDHandler.prototype = {
             return DND.DragMotionResult.NO_DROP;
         }
 
-        let vertical_panel = this._panelZone.get_parent()._delegate.is_vertical;
+        let vertical_panel = this._isVertical();
         let children = this._panelZone.get_children();
         let horizontal_rtl = St.Widget.get_default_direction () === St.TextDirection.RTL && !vertical_panel;
 
@@ -2040,7 +2196,7 @@ PanelZoneDNDHandler.prototype = {
         let layout = applet.getAllowedLayout();
         if (layout == Applet.AllowedLayout.BOTH) return true;
         if (applet instanceof Applet.IconApplet && !(applet instanceof Applet.TextIconApplet)) return true;
-        if (layout == ((this._panelZone.get_parent()._delegate.is_vertical) ? Applet.AllowedLayout.VERTICAL : Applet.AllowedLayout.HORIZONTAL)) return true;
+        if (layout == ((this._isVertical()) ? Applet.AllowedLayout.VERTICAL : Applet.AllowedLayout.HORIZONTAL)) return true;
         return false;
     },
 
@@ -2119,6 +2275,8 @@ Panel.prototype = {
 
         this.actor = new Cinnamon.GenericContainer({ name: 'panel', reactive: true });
         this.addPanelStyleClass(this.panelPosition);
+        // Per-panel class so a theme can target one specific panel by id.
+        this.actor.add_style_class_name('panel-id-' + this.panelId);
 
         this.actor._delegate = this;
 
@@ -2146,6 +2304,19 @@ Panel.prototype = {
 
         this.addContextMenuToPanel(this.panelPosition);
 
+        // Compose this panel's behavior from strategies based on its type. The
+        // default (edge) strategies preserve upstream behavior exactly; non-edge
+        // types attach their own geometry/visibility/layout here. Created before
+        // the first _moveResizePanel() below, which routes through this._geometry.
+        let panelType = getPanelType(this.panelId);
+        this._geometry = imports.ui.panelGeometry.createGeometry(this, panelType);
+        this._visibility = imports.ui.panelVisibility.createVisibility(this, getPanelExtended(this.panelId));
+        this._layout = imports.ui.panelLayout.createLayout(this, panelType);
+        this._geometry.attach();
+        this._visibility.attach();
+        this._layout.attach();
+        this._visSig = this._visibilitySignature();
+
         Main.layoutManager.addChrome(this.actor, { addToWindowgroup: false });
         this._moveResizePanel();
         this._onPanelEditModeChanged();
@@ -2167,6 +2338,7 @@ Panel.prototype = {
         this._signalManager.connect(global.settings, "changed::" + PANEL_ZONE_TEXT_SIZES, this._onPanelZoneSizesChanged, this);
         this._signalManager.connect(global.settings, "changed::panel-edit-mode", this._onPanelEditModeChanged, this);
         this._signalManager.connect(global.settings, "changed::no-adjacent-panel-barriers", this._updatePanelBarriers, this);
+        this._signalManager.connect(global.settings, "changed::panels-extended", this._onPanelsExtendedChanged, this);
 
         this._onPanelZoneSizesChanged();
     },
@@ -2358,6 +2530,9 @@ Panel.prototype = {
         this._destroyed = true;    // set this early so that any routines triggered during
                                    // the destroy process can test it
 
+        this._geometry.detach();
+        this._visibility.detach();
+
         Main.layoutManager.removeChrome(this.actor);
 
         if (removeIconSizes) this._removeZoneIconSizes();
@@ -2367,6 +2542,10 @@ Panel.prototype = {
 
         this._clearPanelBarriers();
         AppletManager.unloadAppletsOnPanel(this.panelId);
+        // The layout owns the zones the applets were just removed from (grid rows,
+        // expanding arms), so it is torn down only now - like the standard zones
+        // below - or the applets' actors would be destroyed out from under them.
+        this._layout.detach();
         this._context_menu.close();
         this._context_menu.destroy();
 
@@ -2514,6 +2693,10 @@ Panel.prototype = {
      * https://cgit.freedesktop.org/cgit/?url=xorg/proto/fixesproto/plain/fixesproto.txt
      */
     _updatePanelBarriers: function() {
+        return this._geometry.updateBarriers();
+    },
+
+    _updatePanelBarriers_edge: function() {
 
         this._clearPanelBarriers();
 
@@ -2682,6 +2865,10 @@ Panel.prototype = {
     },
 
     _onButtonPressEvent: function (actor, event) {
+        return this._geometry.onButtonPress(actor, event);
+    },
+
+    _onButtonPressEvent_edge: function (actor, event) {
         if (event.get_button() == 1) {
             if (this._context_menu.isOpen)
                 this._context_menu.toggle();
@@ -2734,7 +2921,7 @@ Panel.prototype = {
     },
 
     _processPanelAutoHide: function() {
-        this._autohideSettings = this._getProperty(PANEL_AUTOHIDE_KEY, "s");
+        this._autohideSettings = this._geometry.supportsAutoHide() ? this._getProperty(PANEL_AUTOHIDE_KEY, "s") : "false";
 
         if (this._autohideSettings == "intel") {
             this._signalManager.connect(global.display, "notify::focus-window", this._onFocusChanged, this);
@@ -2753,7 +2940,12 @@ Panel.prototype = {
         }
 
         this._updatePanelVisibility();
-        Main.layoutManager._chrome.modifyActorParams(this.actor, { affectsStruts: this._autohideSettings == "false" });
+        // Only an edge panel that isn't auto-hiding reserves work-area struts.
+        // A drawer collapses the panel to a peek handle, so it shouldn't permanently
+        // reserve the work area - the handle floats over windows like an auto-hide panel.
+        let reserveStruts = this._autohideSettings == "false" && this.occupiesEdge() &&
+                            !this._visibility.hasDrawer();
+        Main.layoutManager._chrome.modifyActorParams(this.actor, { affectsStruts: reserveStruts });
     },
     /**
      * _getScaledPanelHeight:
@@ -2781,6 +2973,10 @@ Panel.prototype = {
     * current position in order to calculate the exposed size.
     */
     _setClipRegion: function(hidden, offset) {
+        return this._geometry.setClipRegion(hidden, offset);
+    },
+
+    _setClipRegion_edge: function(hidden, offset) {
         if (!this._shouldClipPanel()) {
             // important during monitor layout changes.
             this.actor.remove_clip(); // no-op if there wasn't any clipping to begin with.
@@ -2906,12 +3102,113 @@ Panel.prototype = {
     },
 
     /**
+     * _visibilitySignature:
+     *
+     * A stable string of just the *structural* visibility config (which behaviors
+     * are enabled and their tuning), excluding transient state like drawer-collapsed
+     * or drag position. Used to decide whether a panels-extended change requires
+     * rebuilding the visibility strategy. The field list lives with the behaviors.
+     */
+    _visibilitySignature: function() {
+        return imports.ui.panelVisibility.configSignature(getPanelExtended(this.panelId));
+    },
+
+    /**
+     * _onPanelsExtendedChanged:
+     *
+     * Re-apply this panel's extended config when panels-extended changes (e.g. from
+     * the Advanced settings dialog). Geometry settings (position/size/anchor/etc.)
+     * apply live because _moveResizePanel re-reads the config through the geometry
+     * strategy. Visibility behaviors are only rebuilt when their structural config
+     * actually changes, so transient writes (drag position, drawer-collapsed) don't
+     * churn them. Layout structure (e.g. grid rows) isn't rebuilt here because that
+     * would discard the panel's applets; changing it requires re-adding the panel.
+     */
+    _onPanelsExtendedChanged: function() {
+        if (this._destroyed)
+            return;
+
+        let sig = this._visibilitySignature();
+        if (sig !== this._visSig) {
+            this._visSig = sig;
+            this._visibility.detach();
+            this._visibility = imports.ui.panelVisibility.createVisibility(this, getPanelExtended(this.panelId));
+            this._visibility.attach();
+            // A drawer and auto-hide don't combine, so adding or removing one changes
+            // whether this panel auto-hides.
+            this._processPanelAutoHide();
+        }
+
+        this._moveResizePanel();
+    },
+
+    /**
+     * occupiesEdge:
+     *
+     * Whether this panel spans a screen edge like an upstream panel: it then
+     * reserves that strip (struts, menu work area, the height available to
+     * vertical panels, one of the four edge slots). Floating/grid/expanding
+     * panels sit inside the monitor and don't. Decided by the geometry strategy.
+     *
+     * Returns (boolean): true for an edge panel
+     */
+    occupiesEdge: function() {
+        return this._geometry.occupiesEdge();
+    },
+
+    /**
+     * getZoneOrientation:
+     *
+     * The St.Side orientation an applet should use in the given zone (location
+     * label). Edge/floating panels have only the standard zones and use the panel's
+     * own orientation (the @fallback). Grid/expanding layouts have zones that can run
+     * perpendicular to the panel (e.g. an expanding panel's vertical arm), so they
+     * override this through the layout strategy. Used by AppletManager.
+     */
+    getZoneOrientation: function(location, fallback) {
+        return this._layout.getZoneOrientation(location, fallback);
+    },
+
+    /**
+     * getZoneThickness:
+     *
+     * The thickness (px) of a custom layout zone (a grid row, an expanding arm), or
+     * 0 for ordinary panels/zones. Used to size zone icons (getPanelZoneIconSize).
+     */
+    getZoneThickness: function(location) {
+        return this._layout.getZoneThickness(location);
+    },
+
+    /**
+     * getZoneHeight:
+     *
+     * The height an applet in the given zone should size itself to: the zone's
+     * own thickness for a grid row / expanding arm, else the panel height. See
+     * AppletManager.createApplet and Applet._panelHeight.
+     */
+    getZoneHeight: function(location) {
+        return this.getZoneThickness(location) || this.height;
+    },
+
+    /**
      * _moveResizePanel:
      *
      * Function to update the panel position, size, and clip region according to settings
      * values.  Note that this is also called when the style changes.
      */
+    // Dispatcher: routes geometry through the attached geometry strategy. Bound
+    // once in _init (e.g. style-changed), so it must stay stable - the strategy
+    // is swapped per-instance, not this method. EdgeGeometry delegates straight
+    // back to _moveResizePanel_edge below, keeping edge panels bit-identical.
     _moveResizePanel: function() {
+        let result = this._geometry.moveResize();
+        // Let visibility behaviors (e.g. drawer) re-apply state relative to the
+        // panel's freshly-set home position.
+        this._visibility.afterGeometry();
+        return result;
+    },
+
+    _moveResizePanel_edge: function() {
         if (this._destroyed)
             return false;
 
@@ -3289,7 +3586,21 @@ Panel.prototype = {
             typeString = "symbolic";
         }
 
-        return this._panelZoneSizes[typeString][locationLabel];
+        let size = this._panelZoneSizes[typeString][locationLabel];
+
+        // Custom layouts (grid rows, expanding arms) have zones that aren't in the
+        // left/center/right size table, so size their icons to fit the zone's own
+        // thickness (a grid row is panelHeight/rows tall, an arm is its thickness)
+        // rather than the full panel height.
+        if (size === undefined) {
+            let t = this.getZoneThickness(locationLabel);
+            if (t > 0)
+                size = toStandardIconSize(Math.max(8, t / global.ui_scale));
+            else
+                size = this._panelZoneSizes[typeString]["left"];
+        }
+
+        return size;
     },
 
     _removeZoneIconSizes: function() {
@@ -3326,6 +3637,10 @@ Panel.prototype = {
     },
 
     _getPreferredWidth: function(actor, forHeight, alloc) {
+        return this._layout.getPreferredWidth(actor, forHeight, alloc);
+    },
+
+    _getPreferredWidth_edge: function(actor, forHeight, alloc) {
 
         alloc.min_size = -1;
         alloc.natural_size = -1;
@@ -3336,6 +3651,10 @@ Panel.prototype = {
     },
 
     _getPreferredHeight: function(actor, forWidth, alloc) {
+        return this._layout.getPreferredHeight(actor, forWidth, alloc);
+    },
+
+    _getPreferredHeight_edge: function(actor, forWidth, alloc) {
 
         alloc.min_size = -1;
         alloc.natural_size = -1;
@@ -3552,6 +3871,10 @@ Panel.prototype = {
     },
 
     _allocate: function(actor, box, flags) {
+        return this._layout.allocate(actor, box, flags);
+    },
+
+    _allocate_edge: function(actor, box, flags) {
 
         let cornerMinWidth = 0;
         let cornerWidth = 0;
@@ -3719,38 +4042,14 @@ Panel.prototype = {
                         this._shouldShow = false;
                         break;
                     }
-                    let x, y;
-
-                    /* Calculate the x or y instead of getting it from the actor since the
-                    * actor might be hidden*/
-                    switch (this.panelPosition) {
-                        case PanelLoc.top:
-                            y = this.monitor.y;
-                            break;
-                        case PanelLoc.bottom:
-                            y = this.monitor.y + this.monitor.height - this.actor.height;
-                            break;
-                        case PanelLoc.left:
-                            x = this.monitor.x;
-                            break;
-                        case PanelLoc.right:
-                            x = this.monitor.x + this.monitor.width - this.actor.width;
-                            break;
-                        default:
-                            global.log("updatePanelVisibility - unrecognised panel position "+this.panelPosition);
-                    }
-
-                    let a = this.actor;
+                    /* The geometry gives the rectangle the panel occupies when shown,
+                    * since the actor might be hidden */
+                    let a = this._geometry.getOverlapRect();
                     let b = global.display.focus_window.get_frame_rect();
                     /* Magic to check whether the panel position overlaps with the
                     * current focused window */
-                    if (this.panelPosition == PanelLoc.top || this.panelPosition == PanelLoc.bottom) {
-                        this._shouldShow = !(Math.max(a.x, b.x) < Math.min(a.x + a.width, b.x + b.width) &&
-                                            Math.max(y, b.y) < Math.min(y + a.height, b.y + b.height));
-                    } else {
-                        this._shouldShow = !(Math.max(x, b.x) < Math.min(x + a.width, b.x + b.width) &&
-                                            Math.max(a.y, b.y) < Math.min(a.y + a.height, b.y + b.height));
-                    }
+                    this._shouldShow = !(Math.max(a.x, b.x) < Math.min(a.x + a.width, b.x + b.width) &&
+                                        Math.max(a.y, b.y) < Math.min(a.y + a.height, b.y + b.height));
 
             } // end of switch on autohidesettings
         }
@@ -3869,27 +4168,19 @@ Panel.prototype = {
                             mode: Clutter.AnimationMode.EASE_OUT_QUAD };
 
         // set up original and destination positions and add tween
-        // destination parameter
+        // destination parameter. The geometry says where the panel sits when
+        // shown; origPos is one pixel further out than the hidden strip, i.e.
+        // fully off the monitor.
+        let shown = this._geometry.getShownRect();
+        let hidden = this._geometry.getHiddenRect();
         let origPos, destPos;
         if (isHorizontal) {
-            let height = this.actor.get_height();
-            if (this.panelPosition == PanelLoc.top) {
-                destPos = this.monitor.y;
-                origPos = this.monitor.y - height;
-            } else {
-                destPos = this.monitor.y + this.monitor.height - height;
-                origPos = this.monitor.y + this.monitor.height;
-            }
+            destPos = shown.y;
+            origPos = this.panelPosition == PanelLoc.top ? hidden.y - 1 : hidden.y + 1;
             panelParams['y'] = destPos;
         } else {
-            let width = this.actor.get_width();
-            if (this.panelPosition == PanelLoc.left) {
-                destPos = this.monitor.x;
-                origPos = this.monitor.x - width;
-            } else {
-                destPos = this.monitor.width - width + this.monitor.x;
-                origPos = this.monitor.width + this.monitor.x;
-            }
+            destPos = shown.x;
+            origPos = this.panelPosition == PanelLoc.left ? hidden.x - 1 : hidden.x + 1;
             panelParams['x'] = destPos;
         }
 
@@ -3933,20 +4224,13 @@ Panel.prototype = {
         // setup destination position and add tween destination parameter
         // remember to always leave a vestigial 1px strip or the panel
         // will become inaccessible
+        let hidden = this._geometry.getHiddenRect();
         let destPos;
         if (isHorizontal) {
-            let height = this.actor.get_height();
-            if (this.panelPosition == PanelLoc.top)
-                destPos = this.monitor.y - height + 1;
-            else
-                destPos = this.monitor.y + this.monitor.height - 1;
+            destPos = hidden.y;
             panelParams['y'] = destPos;
         } else {
-            let width = this.actor.get_width();
-            if (this.panelPosition == PanelLoc.left)
-                destPos = this.monitor.x - width + 1;
-            else
-                destPos = this.monitor.x + this.monitor.width - 1;
+            destPos = hidden.x;
             panelParams['x'] = destPos;
         }
 
@@ -3981,6 +4265,9 @@ Panel.prototype = {
         this._leftBoxDNDHandler.reset();
         this._centerBoxDNDHandler.reset();
         this._rightBoxDNDHandler.reset();
+        // Layout-owned zones (grid rows, expanding arms) have their own handlers.
+        if (this._layout.resetDNDZones)
+            this._layout.resetDNDZones();
     }
 };
 

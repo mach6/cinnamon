@@ -153,6 +153,41 @@
       </description>
     </key>
 
+    <key type="as" name="panels-extended">
+      <default>[]</default>
+      <summary>Extended per-panel configuration for non-edge panel types</summary>
+      <description>
+        A string array; each element is a JSON object describing one panel, keyed
+        by its "id" (matching the id in panels-enabled). A panel id absent from
+        this array (or with "type":"edge") behaves exactly as a traditional
+        edge-docked panel, so existing configurations are unaffected.
+
+        Common fields:
+          "id": int, "type": "edge"|"floating"|"grid"|"expanding" (anything
+          else is treated as "edge").
+
+        Geometry fields are type-specific:
+          floating:  x, y (px from the monitor's top-left), width, height,
+                     sizing ("fixed"|"fit-content"|"fit-content-with-max"),
+                     orientation ("horizontal"|"vertical").
+          grid:      anchor ("top-left", "top-center", ... "bottom-right"; the
+                     eight edge/corner points), width, height, sizing, rows,
+                     rowAlignments (["left"|"center"|"right", ...] per row).
+          expanding: anchor (a corner: "top-left", "top-right", "bottom-left",
+                     "bottom-right"), expandAxes ("both" = an L, "x" = a
+                     horizontal strip, "y" = a vertical strip), thickness (arm
+                     px), width, height.
+
+        Composable visibility behaviours are additional fields on the same
+        object: drawer (bool), drawerDirection ("start"|"end"|"left"|"right"|
+        "top"|"bottom"), drawerCollapsed (persisted state), hoverExpand (bool),
+        hoverShowDelay and hoverHideDelay (ms; also used by expanding panels),
+        workspaceContextual (bool), workspaces ([int, ...], 0-based). See the
+        panel strategy modules (panelGeometry.js / panelVisibility.js /
+        panelLayout.js) for the authoritative per-field semantics.
+      </description>
+    </key>
+
     <key type="s" name="panel-zone-icon-sizes">
       <default>'[{"panelId": 1, "left": 0, "center": 0, "right": 24}]'</default>
       <summary>Per-zone fullcolor icon-size configuration</summary>

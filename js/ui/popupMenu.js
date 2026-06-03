@@ -2352,16 +2352,32 @@ var PopupMenu = class PopupMenu extends PopupMenuBase {
         if (parentPanel) {
             let monitor = Main.layoutManager.findMonitorForActor(this.sourceActor)
             let panels = Main.panelManager.getPanelsInMonitor(monitor.index);
-            let children = Main.uiGroup.get_children();
-            let panelIndex = children.indexOf(parentPanel);
 
+            // Identify the Panel object that owns this menu's source.
+            let ownerPanel = null;
             for (let i = 0; i < panels.length; i++) {
-                let idx = children.indexOf(panels[i].actor);
-                if (idx < panelIndex)
-                    panelIndex = idx;
+                if (panels[i].actor === parentPanel) { ownerPanel = panels[i]; break; }
             }
 
-            Main.uiGroup.set_child_below_sibling(this.actor, Main.uiGroup.get_child_at_index(panelIndex));
+            // A non-edge panel (floating/grid/expanding) can geometrically overlap its
+            // OWN actor - a grid's lower rows, an expanding panel's perpendicular L-arm -
+            // so the menu must sit ABOVE the panel or it renders behind it. Edge panels
+            // never overlap their menu, so keep the upstream "just below the panel"
+            // z-order that avoids a cosmetic seam where the two touch.
+            if (ownerPanel && !ownerPanel.occupiesEdge()) {
+                Main.uiGroup.set_child_above_sibling(this.actor, null);
+            } else {
+                let children = Main.uiGroup.get_children();
+                let panelIndex = children.indexOf(parentPanel);
+
+                for (let i = 0; i < panels.length; i++) {
+                    let idx = children.indexOf(panels[i].actor);
+                    if (idx < panelIndex)
+                        panelIndex = idx;
+                }
+
+                Main.uiGroup.set_child_below_sibling(this.actor, Main.uiGroup.get_child_at_index(panelIndex));
+            }
         } else {
             Main.uiGroup.set_child_above_sibling(this.actor, null);
         }
@@ -2531,6 +2547,9 @@ var PopupMenu = class PopupMenu extends PopupMenuBase {
         let panels = Main.panelManager.getPanelsInMonitor(monitor.index);
 
         for (let panel of panels) {
+            // Skip non-edge panels (see _calculatePosition) - they don't reserve an edge.
+            if (!panel.occupiesEdge())
+                continue;
             if (panel.panelPosition == PanelLoc.top || panel.panelPosition == PanelLoc.bottom) {
                 maxHeight -= panel.actor.height;
             }
@@ -2564,6 +2583,12 @@ var PopupMenu = class PopupMenu extends PopupMenuBase {
 
         for (let panel of panels) {
             if (!panel.getIsVisible()) continue;
+            // Only edge panels span a screen edge and reserve that strip. A non-edge
+            // panel (floating/grid/expanding) doesn't, and its actor may be a large
+            // transparent bounding box, so carving its full size out of the workable
+            // area would shove the menu far from its applet. Skip those.
+            if (!panel.occupiesEdge())
+                continue;
             switch (panel.panelPosition) {
                 case PanelLoc.top:
                     y1 += panel.actor.height;
@@ -2580,6 +2605,31 @@ var PopupMenu = class PopupMenu extends PopupMenuBase {
             }
         }
 
+        // For a non-edge panel (floating/grid/expanding) anchor the menu to the
+        // panel/zone box rather than the screen edge, so it stays attached to its
+        // applet: a floating panel's menu opens just off the panel, a multi-row grid
+        // opens past its outer-most row/column, and an expanding panel opens off the
+        // arm (horizontal or vertical) the applet actually sits in. EdgeGeometry
+        // returns null, so edge panels keep their exact upstream positioning.
+        let anchorBox = null;
+        let bounds = null;
+        for (let panel of panels) {
+            if (panel.actor.contains(this.sourceActor)) {
+                let placement = panel._geometry.getMenuAnchorBox(this.sourceActor);
+                if (placement) {
+                    anchorBox = placement.anchor;
+                    bounds = placement.bounds;
+                }
+                break;
+            }
+        }
+        // Cross-axis clamp: the menu's free span. Defaults to the monitor work area;
+        // an expanding L narrows it so the menu can't spill across the other arm.
+        let bx1 = bounds ? Math.max(x1, bounds.x1) : x1;
+        let bx2 = bounds ? Math.min(x2, bounds.x2) : x2;
+        let by1 = bounds ? Math.max(y1, bounds.y1) : y1;
+        let by2 = bounds ? Math.min(y2, bounds.y2) : y2;
+
         let xPos, yPos;
         switch (this._orientation) {
             case St.Side.TOP:
@@ -2588,12 +2638,19 @@ var PopupMenu = class PopupMenu extends PopupMenuBase {
                 let xCenter = (this._slidePosition == -1) ? sourceBox.x1 + (sourceBox.x2 - sourceBox.x1) / 2 : this._slidePosition;
                 xPos = xCenter - (natWidth / 2);
 
-                // we don't want to go off the screen so we adjust if needed
-                if (xPos < x1) xPos = x1;
-                else if (xPos + natWidth > x2) xPos = x2 - natWidth;
+                // we don't want to go off the screen (or, for an L, across the other
+                // arm) so we adjust if needed
+                if (xPos < bx1) xPos = bx1;
+                else if (xPos + natWidth > bx2) xPos = bx2 - natWidth;
 
-                // now we calculate the x position based on the orientation
-                if (this._orientation === St.Side.BOTTOM || (y2 - sourceBox.y2) < natHeight) {
+                if (anchorBox) {
+                    // Hug the panel/zone's outer edge, opening into the free space the
+                    // orientation points to (up for BOTTOM).
+                    yPos = this._hugAnchorEdge(this._orientation === St.Side.BOTTOM,
+                                               anchorBox.y1, anchorBox.y2, natHeight, y1, y2);
+                }
+                // now we calculate the y position based on the orientation
+                else if (this._orientation === St.Side.BOTTOM || (y2 - sourceBox.y2) < natHeight) {
                     this.sideFlipped = true;
                     yPos = y2 - natHeight;
                 }
@@ -2607,13 +2664,21 @@ var PopupMenu = class PopupMenu extends PopupMenuBase {
                 // align the top of the menu with the top of the source
                 yPos = (this._slidePosition == -1) ? sourceBox.y1 : this._slidePosition;
 
-                // we don't want to go off the screen so we adjust if needed
-                if (yPos < y1) yPos = y1;
-                else if (yPos + natHeight > y2) yPos = y2 - natHeight;
+                // we don't want to go off the screen (or, for an L, across the other
+                // arm) so we adjust if needed
+                if (yPos < by1) yPos = by1;
+                else if (yPos + natHeight > by2) yPos = by2 - natHeight;
 
+                if (anchorBox) {
+                    // Hug the panel/zone's outer edge (the outer-most column for a grid,
+                    // the vertical arm for an expanding panel), opening into free space
+                    // (leftward for RIGHT).
+                    xPos = this._hugAnchorEdge(this._orientation === St.Side.RIGHT,
+                                               anchorBox.x1, anchorBox.x2, natWidth, x1, x2);
+                }
                 // now we calculate the x position based on the orientation
                 // if the menu opens to the right, we also need to make sure we have room for it on that side
-                if (this._orientation === St.Side.RIGHT || x2 - sourceBox.x2 < natWidth) {
+                else if (this._orientation === St.Side.RIGHT || x2 - sourceBox.x2 < natWidth) {
                     this.sideFlipped = true;
                     xPos = Math.min(sourceBox.x1, x2) - natWidth;
                 }
@@ -2624,6 +2689,41 @@ var PopupMenu = class PopupMenu extends PopupMenuBase {
                 break;
         }
         return [Math.round(xPos), Math.round(yPos)];
+    }
+
+    /**
+     * _hugAnchorEdge:
+     * @before (boolean): open on the near side of the anchor (above / to the left)
+     * @a1, @a2 (number): the anchor box's extent on the open axis
+     * @size (number): the menu's size on that axis
+     * @l1, @l2 (number): the work-area limits on that axis
+     *
+     * Position a menu flush against a non-edge panel's anchor box on one axis.
+     * It opens on the side @before asks for and only flips to the other side
+     * when that one can't fit the menu but has more room; then it is clamped to
+     * the work area. Sets this.sideFlipped to match the side chosen.
+     *
+     * Returns (number): the menu position on that axis
+     */
+    _hugAnchorEdge(before, a1, a2, size, l1, l2) {
+        let pos;
+        if (before) {
+            pos = a1 - size;
+            if (pos < l1 && (l2 - a2) > (a1 - l1)) {
+                before = false;
+                pos = a2;
+            }
+        } else {
+            pos = a2;
+            if (pos + size > l2 && (a1 - l1) > (l2 - a2)) {
+                before = true;
+                pos = a1 - size;
+            }
+        }
+        if (pos < l1) pos = l1;
+        else if (pos + size > l2) pos = l2 - size;
+        this.sideFlipped = before;
+        return pos;
     }
 
     _boxGetPreferredWidth (actor, forHeight, alloc) {

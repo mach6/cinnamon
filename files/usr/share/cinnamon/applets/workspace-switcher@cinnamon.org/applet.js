@@ -549,8 +549,13 @@ class CinnamonWorkspaceSwitcher extends Applet.Applet {
     }
 
     _onWorkspaceChanged(wm, from, to) {
-        this.buttons[from].activate(false);
-        this.buttons[to].activate(true);
+        // A switch-workspace signal can arrive while the buttons are out of sync with
+        // the workspace count (queueCreateButtons is deferred, and the count can change
+        // around startup / workspace add-remove), so the indices may be out of range.
+        if (this.buttons[from])
+            this.buttons[from].activate(false);
+        if (this.buttons[to])
+            this.buttons[to].activate(true);
     }
 
     on_panel_edit_mode_changed() {

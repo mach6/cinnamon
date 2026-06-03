@@ -786,6 +786,9 @@ function setThemeStylesheet(cssStylesheet)
 function loadTheme() {
     let themeContext = St.ThemeContext.get_for_stage (global.stage);
     let theme = new St.Theme ({ fallback_stylesheet: _defaultCssStylesheet });
+    // Default styling for extended panels (drawer/expanding handles, etc.), loaded
+    // before the user theme so its rules act as defaults the theme can override.
+    theme.load_stylesheet(global.datadir + '/theme/floating-panels.css');
     let stylesheetLoaded = false;
     if (_cssStylesheet != null) {
         stylesheetLoaded = theme.load_stylesheet(_cssStylesheet);

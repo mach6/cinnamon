@@ -1,0 +1,20 @@
+/* Default styling for extended panels (floating / grid / expanding / drawers).
+ *
+ * This sheet is loaded by Main.loadTheme() *beneath* the active theme, so every rule
+ * here is a default the user's theme can override. See docs/floating-panels-theming.md
+ * for the full class list. The panel geometry (sizes/positions) is set in code; this
+ * file only controls appearance.
+ */
+
+/* Peek / trigger handles. Kept deliberately thin and subtle; a theme can restyle them
+ * by targeting these same classes. */
+.panel-drawer-handle,
+.panel-expanding-handle {
+    background-color: rgba(255, 255, 255, 0.45);
+    border-radius: 2px;
+}
+
+.panel-drawer-handle:hover,
+.panel-expanding-handle:hover {
+    background-color: rgba(255, 255, 255, 0.8);
+}
